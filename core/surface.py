@@ -38,6 +38,24 @@ _X = np.arange(H_SIZE, dtype=np.int64)
 X_EVEN = (_X & 1) == 0
 X_ODD = ~X_EVEN
 
+_PARITY: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
+def parity(width: int, phase: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """``(even, odd)`` masks for a row slice of ``width`` columns.
+
+    ``phase`` is the parity of the slice's first column, so a window that
+    starts on an odd column of the map still lines up with the pair encoding.
+    """
+    key = (width, phase & 1)
+    cached = _PARITY.get(key)
+    if cached is None:
+        x = np.arange(width, dtype=np.int64) + (phase & 1)
+        odd = (x & 1) == 1
+        cached = (~odd, odd)
+        _PARITY[key] = cached
+    return cached
+
 #: Smallest ``up - down`` that still decodes as a tunnel (see solver).
 #: ``t = (up - TUNNEL_PROOF - down) & ~7`` must stay above ``MIN_RDELTA``.
 MIN_TUNNEL_GAP = TUNNEL_PROOF + 2 * MIN_RDELTA  # 32
@@ -51,30 +69,34 @@ def is_double(meta: np.ndarray) -> np.ndarray:
     return (meta & DOUBLE_LEVEL) != 0
 
 
-def up_alt(height: np.ndarray, meta: np.ndarray) -> np.ndarray:
+def up_alt(height: np.ndarray, meta: np.ndarray, phase: int = 0) -> np.ndarray:
     """``GET_UP_ALT`` — the surface drawn on top at every voxel."""
+    even, _odd = parity(height.shape[1], phase)
     dbl = is_double(meta)
-    return np.where(dbl & X_EVEN, np.roll(height, -1, axis=1), height)
+    return np.where(dbl & even, np.roll(height, -1, axis=1), height)
 
 
-def down_alt(height: np.ndarray, meta: np.ndarray) -> np.ndarray:
+def down_alt(height: np.ndarray, meta: np.ndarray, phase: int = 0) -> np.ndarray:
     """``GET_DOWN_ALT`` — the surface underneath at every voxel."""
+    _even, odd = parity(height.shape[1], phase)
     dbl = is_double(meta)
-    return np.where(dbl & X_ODD, np.roll(height, 1, axis=1), height)
+    return np.where(dbl & odd, np.roll(height, 1, axis=1), height)
 
 
-def up_terrain(meta: np.ndarray) -> np.ndarray:
+def up_terrain(meta: np.ndarray, phase: int = 0) -> np.ndarray:
     """``GET_REAL_TERRAIN`` — material index (0..7) of the upper surface."""
+    even, odd = parity(meta.shape[1], phase)
     dbl = is_double(meta)
-    src = np.where(X_ODD | ~dbl, meta, np.roll(meta, -1, axis=1))
+    src = np.where(odd | ~dbl, meta, np.roll(meta, -1, axis=1))
     return ((src & TERRAIN_MASK) >> TERRAIN_OFFSET).astype(np.uint8)
 
 
-def down_terrain(meta: np.ndarray) -> np.ndarray:
+def down_terrain(meta: np.ndarray, phase: int = 0) -> np.ndarray:
     """``GET_REAL_DOWNTERRAIN`` — material index (0..7) of the lower surface."""
+    _even, odd = parity(meta.shape[1], phase)
     dbl = is_double(meta)
     prv = np.roll(meta, 1, axis=1)
-    src = np.where(dbl, np.where(X_ODD, prv, meta), meta)
+    src = np.where(dbl, np.where(odd, prv, meta), meta)
     return ((src & TERRAIN_MASK) >> TERRAIN_OFFSET).astype(np.uint8)
 
 
@@ -182,17 +204,17 @@ class Surface:
         """Pairs whose two flag bytes disagree (0 in every shipped world)."""
         return int(np.count_nonzero(self.pair_double() != ((self.m_odd & DOUBLE_LEVEL) != 0)))
 
-    def up_alt(self) -> np.ndarray:
-        return up_alt(self.height, self.meta)
+    def up_alt(self, phase: int = 0) -> np.ndarray:
+        return up_alt(self.height, self.meta, phase)
 
-    def down_alt(self) -> np.ndarray:
-        return down_alt(self.height, self.meta)
+    def down_alt(self, phase: int = 0) -> np.ndarray:
+        return down_alt(self.height, self.meta, phase)
 
-    def up_terrain(self) -> np.ndarray:
-        return up_terrain(self.meta)
+    def up_terrain(self, phase: int = 0) -> np.ndarray:
+        return up_terrain(self.meta, phase)
 
-    def down_terrain(self) -> np.ndarray:
-        return down_terrain(self.meta)
+    def down_terrain(self, phase: int = 0) -> np.ndarray:
+        return down_terrain(self.meta, phase)
 
     def pair_up(self) -> np.ndarray:
         """Deck height of every pair (the odd column, ``GET_UP_ALT``)."""
@@ -259,9 +281,24 @@ class Surface:
     def _write_terrain(self, view: np.ndarray, terrain: int, mask: np.ndarray) -> None:
         if terrain == KEEP_TERRAIN:
             return
-        value = np.uint8((terrain << TERRAIN_OFFSET) & TERRAIN_MASK)
+        # values are unshifted terrain indices; the shift happens in the writer
+        self._write_terrain_arr(np.full(mask.shape, terrain, np.uint8), mask, view)
+
+    @staticmethod
+    def _write_terrain_arr(values: np.ndarray, mask: np.ndarray, view: np.ndarray) -> None:
         keep = np.uint8(~TERRAIN_MASK & 0xFF)
-        view[mask] = (view[mask] & keep) | value
+        v = np.uint8(values)
+        view[mask] = (view[mask] & keep) | (v[mask] << np.uint8(TERRAIN_OFFSET))
+
+    def pair_write_up_terrain_arr(self, values: np.ndarray, mask: np.ndarray) -> None:
+        """Per-pair upper material (0..7), written where ``mask`` is set."""
+        self._check_mask(mask)
+        self._write_terrain_arr(values, mask, self.m_odd)
+
+    def pair_write_down_terrain_arr(self, values: np.ndarray, mask: np.ndarray) -> None:
+        """Per-pair lower material (0..7), written where ``mask`` is set."""
+        self._check_mask(mask)
+        self._write_terrain_arr(values, mask, self.m_even)
 
     def write_up_heights(self, values: np.ndarray) -> None:
         """Writes the **upper** surface for every voxel.
@@ -282,8 +319,12 @@ class Surface:
         """Rewrites the material of every non-double voxel."""
         if terrain == KEEP_TERRAIN:
             return
+        self.write_single_terrain_arr(np.full(self.meta.shape, terrain, np.uint8))
+
+    def write_single_terrain_arr(self, values: np.ndarray) -> None:
+        """Per-voxel material (0..7) for the non-double voxels."""
         dbl = is_double(self.meta)
-        value = np.uint8((terrain << TERRAIN_OFFSET) & TERRAIN_MASK)
-        keep = np.uint8(~TERRAIN_MASK & 0xFF)
         sel = ~dbl
-        self.meta[sel] = (self.meta[sel] & keep) | value
+        keep = np.uint8(~TERRAIN_MASK & 0xFF)
+        v = np.uint8(values) << np.uint8(TERRAIN_OFFSET)
+        self.meta[sel] = (self.meta[sel] & keep) | v[sel]

@@ -1,0 +1,19 @@
+schema_version = "1.0.0"
+
+id = "vangers_world"
+version = "0.1.0"
+name = "Vangers World"
+tagline = "Edit Vangers VMP worlds as two-layer terrain meshes"
+maintainer = "surmap-blender"
+type = "add-on"
+
+website = "https://github.com/DileSoft/surmap-blender"
+
+blender_version_min = "5.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Import-Export", "Object"]
+
+[permissions]
+files = "Import and export Vangers world files (*.vmp, *.pal, world.ini)"

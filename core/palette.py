@@ -39,11 +39,9 @@ def build_palette(palette_file: np.ndarray, begin_colors: list[int],
     rgb[:] = palette_file[:PALETTE_ENTRIES]
     rgb[0] = 0
     for i in range(TERRAIN_MAX):
-        idx = 3 * begin_colors[i]
-        if idx + 2 < PALETTE_ENTRIES * 3:
-            rgb[idx] >>= 1
-            rgb[idx + 1] >>= 1
-            rgb[idx + 2] >>= 1
+        entry = begin_colors[i]
+        if 0 <= entry < PALETTE_ENTRIES:
+            rgb[entry] >>= 1
     for i in range(16):
         v = i * 4
         rgb[224 + i] = v

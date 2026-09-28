@@ -168,21 +168,33 @@ def line_render_indices(height: np.ndarray, meta: np.ndarray, luts: Luts) -> np.
     return out
 
 
+def upper_indices_arr(height: np.ndarray, meta: np.ndarray, luts: Luts,
+                      phase: int = 0) -> np.ndarray:
+    """Palette indices of the upper surface of an arbitrary array pair."""
+    alt = up_alt(height, meta, phase)
+    return _shade_indices(alt, up_terrain(meta, phase),
+                          (meta & SHADOW_MASK) != 0, luts).astype(np.uint8)
+
+
+def lower_indices_arr(height: np.ndarray, meta: np.ndarray, luts: Luts,
+                      phase: int = 0) -> np.ndarray:
+    """Palette indices of the lower surface (see the module caveat)."""
+    alt = down_alt(height, meta, phase)
+    return _shade_indices(alt, down_terrain(meta, phase),
+                          (meta & SHADOW_MASK) != 0, luts).astype(np.uint8)
+
+
 def upper_indices(surface: Surface, luts: Luts) -> np.ndarray:
     """Palette indices of the **upper** surface, shaded per voxel.
 
     Equivalent to what ``regRender`` would show, minus the shadow pass.
     """
-    alt = up_alt(surface.height, surface.meta)
-    return _shade_indices(alt, up_terrain(surface.meta),
-                          (surface.meta & SHADOW_MASK) != 0, luts).astype(np.uint8)
+    return upper_indices_arr(surface.height, surface.meta, luts)
 
 
 def lower_indices(surface: Surface, luts: Luts) -> np.ndarray:
     """Palette indices of the **lower** surface (see the module caveat)."""
-    alt = down_alt(surface.height, surface.meta)
-    return _shade_indices(alt, down_terrain(surface.meta),
-                          (surface.meta & SHADOW_MASK) != 0, luts).astype(np.uint8)
+    return lower_indices_arr(surface.height, surface.meta, luts)
 
 
 def indices_to_rgba(indices: np.ndarray, rgba_table: np.ndarray) -> np.ndarray:

@@ -46,6 +46,7 @@ class VANGERS_PT_authoring(_Panel, Panel):
         row = layout.row(align=True)
         row.operator("vangers.new_world", icon="ADD")
         row.operator("vangers.export_world", icon="EXPORT")
+        layout.label(text="Формат и «enforce» — в параметрах оператора (клавиша F9).")
 
         box = layout.box()
         box.label(text="Bridge (double level)")

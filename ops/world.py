@@ -13,7 +13,8 @@ from core.config import WorldConfig, new_world_config
 from core.palette import load_palette, prepared_rgba
 from core.render import lower_indices_arr, render_prepare, upper_indices_arr
 from core.surface import Surface
-from core.vmp import load_vmp, save_vmp
+from core.vmp import load_vmp, save_vmp, vmp_size_y
+from core.vmc import load_vmc, save_vmc
 from core.window import Region, gather
 
 from ..mesh import build
@@ -56,6 +57,14 @@ def _palette_for(cfg: WorldConfig, directory: str) -> np.ndarray | None:
     return None
 
 
+def _load_surface_vmc(path: str, cfg: WorldConfig) -> Surface:
+    """`.vmc` carries no row count, so `world.ini` must agree with it."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    height, meta = load_vmc(data, cfg.size_y)
+    return Surface(height, meta)
+
+
 def _view_state() -> dict:
     scene = bpy.context.scene
     return {
@@ -94,12 +103,15 @@ class VANGERS_OT_import_world(Operator):
             cfg = WorldConfig.parse(fh.read())
 
         try:
-            height, meta = load_vmp(path)
+            if path.lower().endswith(".vmc"):
+                surface = _load_surface_vmc(path, cfg)
+            else:
+                height, meta = load_vmp(path)
+                surface = Surface(height, meta)
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"cannot read surface: {exc}")
             return {"CANCELLED"}
 
-        surface = Surface(height, meta)
         region = Region(self.x0, self.y0, self.width, self.depth)
         if region.depth > surface.size_y:
             self.report({"ERROR"}, f"the world only has {surface.size_y} rows")
@@ -145,6 +157,13 @@ class VANGERS_OT_export_world(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     filepath: StringProperty(subtype="FILE_PATH")
+    file_format: EnumProperty(
+        name="Format",
+        items=(("AUTO", "Same as loaded", "keep the format the world was loaded from"),
+               ("VMP", ".vmp", "uncompressed"),
+               ("VMC", ".vmc", "compressed with the Huffman codec")),
+        default="AUTO",
+    )
     enforce: BoolProperty(
         name="Enforce tunnel rule everywhere",
         description="Also collapse pairs the author did not touch "
@@ -164,12 +183,33 @@ class VANGERS_OT_export_world(Operator):
             self.report({"ERROR"}, "no Vangers meshes in the scene")
             return {"CANCELLED"}
 
-        height, meta = load_vmp(source)
+        with open(os.path.join(os.path.dirname(source), "world.ini"), "r",
+                  encoding="utf-8", errors="replace") as fh:
+            cfg = WorldConfig.parse(fh.read())
+        try:
+            if source.lower().endswith(".vmc"):
+                with open(source, "rb") as fh:
+                    height, meta = load_vmc(fh.read(), cfg.size_y)
+            else:
+                height, meta = load_vmp(source)
+        except Exception as exc:  # noqa: BLE001
+            self.report({"ERROR"}, f"cannot re-read the source world: {exc}")
+            return {"CANCELLED"}
+
         surface = Surface(height, meta)
         report = sync.heights_to_surface(surface, upper, lower, enforce=self.enforce)
 
-        out = self.filepath or os.path.splitext(source)[0] + ".vmp"
-        save_vmp(out, surface.height, surface.meta)
+        choice = self.file_format
+        if choice == "AUTO":
+            choice = "VMC" if source.lower().endswith(".vmc") else "VMP"
+        out = self.filepath
+        if not out:
+            out = os.path.splitext(source)[0] + "." + choice.lower()
+        if choice == "VMC":
+            with open(out, "wb") as fh:
+                fh.write(save_vmc(surface.height, surface.meta))
+        else:
+            save_vmp(out, surface.height, surface.meta)
         self.report({"INFO"}, f"saved {os.path.basename(out)} ({report})")
         return {"FINISHED"}
 

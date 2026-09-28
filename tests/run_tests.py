@@ -1,7 +1,9 @@
 """Entry point: `blender --background --python tests/run_tests.py`.
 
 Collects every ``test_*`` callable from the ``test_*`` modules in this folder and
-runs them with the dependency-free harness.
+runs them with the dependency-free harness. Real-data tests need a checkout of
+KranX/Vangers; set ``VANGERS_REPO`` to it (a sibling ``../Vangers`` is found
+automatically), otherwise they skip.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ def main() -> int:
         name for name in os.listdir(HERE)
         if name.startswith("test_") and name.endswith(".py")
     )
+    if not modules:
+        print("no test modules found")
+        return 1
     tests = []
     for name in modules:
         mod = importlib.import_module(name[:-3])

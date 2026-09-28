@@ -34,7 +34,17 @@ from .surface import (
     down_alt,
     down_terrain,
 )
-from .vmp import VmpError, load_vmp, load_vmp_bytes, save_vmp, save_vmp_bytes, vmp_size_y
+from .vmp import (
+    VmpError,
+    load_vmp,
+    load_vmp_bytes,
+    load_vmp_rows,
+    save_vmp,
+    save_vmp_bytes,
+    vmp_size_y,
+    vmp_size_y_of_file,
+)
+from .vmc import VmcError, load_vmc, save_vmc
 
 __all__ = [
     "DynamicPalette",
@@ -59,10 +69,15 @@ __all__ = [
     "thickness_from_delta",
     "load_vmp",
     "load_vmp_bytes",
+    "load_vmp_rows",
     "save_vmp",
     "save_vmp_bytes",
     "vmp_size_y",
+    "vmp_size_y_of_file",
     "VmpError",
+    "load_vmc",
+    "save_vmc",
+    "VmcError",
     "H_SIZE",
     "TERRAIN_MAX",
     "TERRAIN_OFFSET",

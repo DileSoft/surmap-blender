@@ -18,7 +18,7 @@ if ADDON not in sys.path:
 if os.path.join(ADDON, "tests") not in sys.path:
     sys.path.insert(0, os.path.join(ADDON, "tests"))
 
-from framework import check, check_eq, world_file  # noqa: E402
+from framework import check, check_eq, sample_config, sample_rows_file  # noqa: E402
 from loader import load_addon  # noqa: E402
 
 _addon = load_addon(ADDON)
@@ -131,26 +131,128 @@ def test_authoring_panel_uses_the_scene() -> None:
     check("vmap_paint_radius" in props, f"brush radius missing: {props}")
 
 
-def test_import_button_opens_the_file_browser() -> None:
-    """Clicking Import must not run execute with an empty path."""
+def test_import_builds_meshes_from_a_real_world() -> None:
+    """The button must load a real world and build both meshes.
+
+    This is the `execute()` path -- which is what a panel button uses, and what
+    background Blender gets even for `INVOKE_DEFAULT`.
+    """
     from vangers_world.ops import world
 
     check(hasattr(world.VANGERS_OT_import_world, "invoke"),
           "import operator has no invoke(), so the button cannot open a dialog")
-    path = world_file("output.vmp")
-    if not path:
-        print("    (skipping: no world found)")
-        return
-    bpy.context.scene.vmap_x0 = 64
-    bpy.context.scene.vmap_width = 32
-    result = bpy.ops.vangers.import_world("INVOKE_DEFAULT", filepath=path)
-    check("FINISHED" in result or "RUNNING_MODAL" in result, f"unexpected result {result}")
-    # the panel's window must have been copied onto the operator
-    op = bpy.context.window_manager.operators[-1] if bpy.context.window_manager.operators else None
-    if op is not None and op.bl_idname == "vangers.import_world":
-        check_eq(op.x0, 64, "invoke() seeded x0 from the scene")
-        check_eq(op.width, 32, "invoke() seeded width from the scene")
-    print("    invoke ok:", result)
+    path = sample_rows_file("output.vmp")
+    result = bpy.ops.vangers.import_world(filepath=path, x0=0, y0=0, width=64, depth=32)
+    check("FINISHED" in result, f"import failed: {result}")
+
+    upper = bpy.data.objects.get("Vangers_upper")
+    lower = bpy.data.objects.get("Vangers_lower")
+    check(upper is not None and lower is not None, "both meshes should exist")
+    check_eq(len(upper.data.vertices), 64 * 32, "one upper vertex per voxel")
+    check_eq(len(lower.data.vertices), (64 // 2) * 32, "one lower vertex per pair")
+
+    # the panel is the source of truth for the window
+    scene = bpy.context.scene
+    check_eq((scene.vmap_width, scene.vmap_depth), (64, 32),
+             "the scene should record the imported window")
+
+
+def test_import_of_an_offset_window_matches_a_full_read() -> None:
+    """The windowed read must be indistinguishable from reading everything.
+
+    This is the seam that is easy to get wrong: the surface handed to the mesher
+    holds only the window's rows, so every lookup inside it has to start at
+    row 0 while the window still keeps its place in the world.
+    """
+    import numpy as np
+
+    from core.surface import Surface
+    from core.vmp import load_vmp
+    from core.window import Region, gather
+    from vangers_world.mesh import build
+    from vangers_world.ops import world
+
+    path = sample_rows_file("output.vmp")
+    x0, y0, width, depth = 4, 5, 40, 24  # pair-aligned in X, offset in Y
+
+    # reference: the whole world, gathered at the absolute position
+    reference = Surface(*load_vmp(path))
+    world_region = Region(x0, y0, width, depth)
+    ref_h, ref_m = gather(reference, world_region)
+
+    # what the addon does: read only the rows, then gather at row 0
+    height, meta = world._read_window(path, sample_config(path), y0, depth)
+    windowed = Surface(height, meta)
+    local = Region(x0, 0, width, depth)
+    got_h, got_m = gather(windowed, local)
+    check(np.array_equal(ref_h, got_h), "windowed heights match the full read")
+    check(np.array_equal(ref_m, got_m), "windowed flags match the full read")
+
+    # and the built mesh must sit at the window's place in the world
+    obj = build.build_upper("probe", windowed, local, None, origin_y=y0)
+    coords = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
+    obj.data.vertices.foreach_get("co", coords)
+    ys = coords.reshape(-1, 3)[:, 1]
+    check_eq((int(ys.min()), int(ys.max())), (y0, y0 + depth - 1),
+             "the mesh Y coordinates must be absolute")
+    check_eq(int(obj["vmap_y0"]), y0, "the object must remember where it came from")
+
+
+def test_offset_window_round_trips_byte_for_byte() -> None:
+    """Import an offset window, export it, and get the original file back.
+
+    This is the whole loop in one test: the windowed read, the mesh round trip
+    and the solver's promise that an untouched world exports unchanged. The
+    window starts on an odd column with an odd width, which is the case where a
+    row-local surface and a world-positioned mesh could disagree.
+    """
+    import tempfile
+
+    import numpy as np
+
+    path = sample_rows_file("output.vmp")
+    result = bpy.ops.vangers.import_world(filepath=path, x0=3, y0=5, width=41, depth=24)
+    check("FINISHED" in result, f"import failed: {result}")
+
+    # the window must have been widened outwards to whole pairs, keeping every
+    # column the caller asked for
+    scene = bpy.context.scene
+    check_eq((scene.vmap_x0, scene.vmap_width), (2, 42),
+             "an odd window is widened to complete pairs")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "out.vmp")
+        export = bpy.ops.vangers.export_world(filepath=out, file_format="VMP")
+        check("FINISHED" in export, f"export failed: {export}")
+        with open(path, "rb") as fh:
+            original = fh.read()
+        with open(out, "rb") as fh:
+            written = fh.read()
+
+    check_eq(len(written), len(original), "the exported world must be the same size")
+    check(np.array_equal(np.frombuffer(original, np.uint8),
+                         np.frombuffer(written, np.uint8)),
+          "an untouched world must export byte-identically")
+
+
+def test_import_seeds_the_window_from_the_panel() -> None:
+    """The window the user typed in the panel must reach the operator.
+
+    Blender refuses to construct an Operator from Python, so the helper is
+    exercised with a stand-in that only has the four slots it writes to.
+    """
+    from vangers_world.ops import world
+
+    class FakeSelf:
+        x0 = y0 = width = depth = 0
+
+    scene = bpy.context.scene
+    scene.vmap_x0, scene.vmap_y0 = 7, 9
+    scene.vmap_width, scene.vmap_depth = 48, 24
+    fake = FakeSelf()
+    world.VANGERS_OT_import_world._seed_from_scene(fake, bpy.context)
+    check_eq((fake.x0, fake.y0, fake.width, fake.depth), (7, 9, 48, 24),
+             "the panel's window should be copied onto the operator")
 
 
 def test_window_panel_offers_an_import_button() -> None:

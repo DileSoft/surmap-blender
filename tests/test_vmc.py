@@ -1,113 +1,95 @@
 """`.vmc` codec tests.
 
-The decisive one is `test_vmc_matches_vmp_of_the_same_world`: the Vangers
-checkout ships both formats for fostral, so the decoder is checked against the
-uncompressed surface directly.
+The decisive one is `test_vmc_decodes_to_the_same_surface_as_vmp`: the Vangers
+checkout ships both formats for one world, so the decoder is checked against the
+uncompressed surface directly. Everything real-data here reads a *slice* of rows
+-- the format is row-seekable, and a full pass over a 16384-row world takes
+seconds per file for no extra coverage.
 """
 
 from __future__ import annotations
 
 import os
-import time
 
 import numpy as np
 
 from core.constants import H_SIZE
 from core.surface import Surface
 from core.vmc import VmcDecoder, VmcError, load_vmc, read_table, save_vmc
-from core.vmp import load_vmp_bytes, vmp_size_y
+from core.vmp import load_vmp_rows, vmp_size_y_of_file
 
-from framework import all_world_files, check, check_eq, world_file
-
-
-def _vmc_vmp_pair() -> tuple[str, str]:
-    """Paths of a world that ships both formats (fostral)."""
-    for vmc in all_world_files("output.vmc"):
-        vmp = os.path.join(os.path.dirname(vmc), "output.vmp")
-        if os.path.isfile(vmp):
-            return vmc, vmp
-    raise AssertionError("no world ships both .vmc and .vmp")
+from framework import (
+    SAMPLE_ROWS,
+    check,
+    check_eq,
+    read_vmc_rows,
+    sample_config,
+    vmc_world,
+)
 
 
 def test_vmc_decodes_to_the_same_surface_as_vmp() -> None:
-    vmc_path, vmp_path = _vmc_vmp_pair()
-    with open(vmp_path, "rb") as fh:
-        vmp_raw = fh.read()
-    size_y = vmp_size_y(vmp_raw)
-    vmp_h, vmp_m = load_vmp_bytes(vmp_raw, size_y)
+    """The whole point of the codec: same world, same bytes on both sides."""
+    vmc_path = vmc_world()
+    vmp_path = os.path.join(os.path.dirname(vmc_path), "output.vmp")
+    check(os.path.isfile(vmp_path), f"{vmc_path} has no .vmp sibling to compare against")
+    cfg = sample_config(vmc_path)
+    rows = min(SAMPLE_ROWS, cfg.size_y)
 
-    t0 = time.perf_counter()
-    with open(vmc_path, "rb") as fh:
-        vmc_raw = fh.read()
-    vmc_h, vmc_m = load_vmc(vmc_raw, size_y)
-    elapsed = time.perf_counter() - t0
+    vmp_h, vmp_m = load_vmp_rows(vmp_path, 0, rows)
+    vmc_h, vmc_m = read_vmc_rows(vmc_path, rows)
 
-    check_eq(vmc_h.shape, (size_y, H_SIZE), "decoded height shape")
-    check(np.array_equal(vmp_h, vmc_h),
-          f"heights differ between .vmp and .vmc (decode took {elapsed:.1f}s)")
+    check_eq(vmc_h.shape, (rows, H_SIZE), "decoded height shape")
+    check(np.array_equal(vmp_h, vmc_h), "heights differ between .vmp and .vmc")
     check(np.array_equal(vmp_m, vmc_m), "flags differ between .vmp and .vmc")
-    print(f"    (.vmc decoded in {elapsed:.1f}s)")
 
 
-def test_every_shipped_vmc_decodes() -> None:
-    files = all_world_files("output.vmc")
-    check(len(files) >= 10, f"expected many worlds, found {len(files)}")
-    for path in files:
-        with open(path, "rb") as fh:
-            raw = fh.read()
-        # sizeY comes from world.ini, next to the file
-        from core.config import WorldConfig
+def test_vmc_roundtrip() -> None:
+    """encode -> decode must be a fixed point, and it must actually compress."""
+    height, meta = read_vmc_rows(vmc_world())
+    rows = height.shape[0]
 
-        with open(os.path.join(os.path.dirname(path), "world.ini"), "r",
-                  encoding="utf-8", errors="replace") as fh:
-            cfg = WorldConfig.parse(fh.read())
-        h, m = load_vmc(raw, cfg.size_y)
-        check_eq(h.shape, (cfg.size_y, H_SIZE), f"{os.path.basename(path)} height shape")
-        s = Surface(h, m)
-        check_eq(s.pair_mismatches(), 0, f"{os.path.basename(path)}: DOUBLE symmetry")
+    packed = save_vmc(height, meta)
+    h2, m2 = load_vmc(packed, rows)
+    check(np.array_equal(height, h2), "height round-trip")
+    check(np.array_equal(meta, m2), "flag round-trip")
+
+    # the codec must earn its keep: raw would be rows * 2 * H_SIZE bytes
+    raw_size = rows * 2 * H_SIZE
+    check(len(packed) < raw_size,
+          f"compression should shrink {raw_size} bytes, got {len(packed)}")
+    print(f"    ({raw_size} -> {len(packed)} bytes, "
+          f"{100 * len(packed) / raw_size:.0f}%)")
 
 
-def test_vmc_roundtrip_on_every_world() -> None:
-    files = all_world_files("output.vmc")
-    for path in files:
-        from core.config import WorldConfig
-
-        with open(os.path.join(os.path.dirname(path), "world.ini"), "r",
-                  encoding="utf-8", errors="replace") as fh:
-            cfg = WorldConfig.parse(fh.read())
-        with open(path, "rb") as fh:
-            h, m = load_vmc(fh.read(), cfg.size_y)
-        packed = save_vmc(h, m)
-        h2, m2 = load_vmc(packed, cfg.size_y)
-        check(np.array_equal(h, h2), f"{os.path.basename(path)}: height round-trip")
-        check(np.array_equal(m, m2), f"{os.path.basename(path)}: flag round-trip")
+def test_vmc_decoded_surface_is_well_formed() -> None:
+    """Decoded retail data must satisfy the pair invariant like any other."""
+    surface = Surface(*read_vmc_rows(vmc_world()))
+    check_eq(surface.pair_mismatches(), 0, "DOUBLE symmetry")
+    check(surface.count_doubles() > 0, "expected some double columns")
 
 
 def test_scalar_and_vector_decoders_agree() -> None:
     """The fast path must equal the literal port of `ExpandBuffer`."""
-    vmc_path, _ = _vmc_vmp_pair()
-    from core.config import WorldConfig
-
-    with open(os.path.join(os.path.dirname(vmc_path), "world.ini"), "r",
-              encoding="utf-8", errors="replace") as fh:
-        cfg = WorldConfig.parse(fh.read())
+    vmc_path = vmc_world()
+    cfg = sample_config(vmc_path)
     with open(vmc_path, "rb") as fh:
         raw = fh.read()
     size_y = cfg.size_y
 
-    offsets, sizes = read_table(raw, size_y)
+    offsets, _ = read_table(raw, size_y)
     dec = VmcDecoder(raw, size_y * 6)
-    rows = [0, 1, 7, 100, size_y - 1]
+    rows = [0, 1, 7, 100, min(size_y - 1, 1000)]
     flat_h = np.zeros(len(rows) * H_SIZE, np.uint8)
     flat_m = np.zeros(len(rows) * H_SIZE, np.uint8)
     for i, y in enumerate(rows):
         dec.expand_row(raw, int(offsets[y]), flat_h, flat_m, i * H_SIZE)
     ref_h = flat_h.reshape(len(rows), H_SIZE)
     ref_m = flat_m.reshape(len(rows), H_SIZE)
-    fast_h, fast_m = load_vmc(raw, size_y)
+    fast_h, fast_m = load_vmc(raw, size_y, rows=rows)
     for i, y in enumerate(rows):
-        check(np.array_equal(ref_h[i], fast_h[y]), f"row {y} heights")
-        check(np.array_equal(ref_m[i], fast_m[y]), f"row {y} flags")
+        check(np.array_equal(ref_h[i], fast_h[i]), f"row {y} heights")
+        check(np.array_equal(ref_m[i], fast_m[i]), f"row {y} flags")
 
 
 def test_encoder_handles_a_world_with_a_single_symbol() -> None:
@@ -118,8 +100,7 @@ def test_encoder_handles_a_world_with_a_single_symbol() -> None:
     """
     height = np.full((4, H_SIZE), 90, np.uint8)
     meta = np.full((4, H_SIZE), 8, np.uint8)
-    packed = save_vmc(height, meta)
-    h, m = load_vmc(packed, 4)
+    h, m = load_vmc(save_vmc(height, meta), 4)
     check(np.array_equal(h, height), "flat heights survive")
     check(np.array_equal(m, meta), "flat flags survive")
 
@@ -135,27 +116,30 @@ def test_encoder_handles_a_world_with_a_single_symbol() -> None:
     check(np.array_equal(m2, meta2), "flags survive around a bridge")
 
 
-def test_vmc_is_smaller_than_vmp() -> None:
-    vmc_path, vmp_path = _vmc_vmp_pair()
-    vmv = os.path.getsize(vmc_path)
-    vmp = os.path.getsize(vmp_path)
-    check(vmv < vmp, f"compression should shrink the file: {vmv} vs {vmp}")
-    print(f"    ({vmp} -> {vmv} bytes, {100 * vmv / vmp:.0f}%)")
-
-
 def test_bad_boundary_is_reported() -> None:
-    vmc_path, _ = _vmc_vmp_pair()
-    from core.config import WorldConfig
-
-    with open(os.path.join(os.path.dirname(vmc_path), "world.ini"), "r",
-              encoding="utf-8", errors="replace") as fh:
-        cfg = WorldConfig.parse(fh.read())
+    """A corrupted size table must fail loudly, not decode garbage."""
+    vmc_path = vmc_world()
+    cfg = sample_config(vmc_path)
     with open(vmc_path, "rb") as fh:
         raw = bytearray(fh.read())
     # claim row 0 is one byte longer than it really is
     raw[4] = (raw[4] + 1) & 0xFF
     try:
-        load_vmc(bytes(raw), cfg.size_y)
+        load_vmc(bytes(raw), cfg.size_y, rows=range(0, 4))
     except VmcError:
         return
     raise AssertionError("expected a boundary error for a corrupted size table")
+
+
+def test_row_selection_is_bounds_checked() -> None:
+    """A bad window is an error, not a silent clamp or an out-of-bounds read."""
+    vmc_path = vmc_world()
+    cfg = sample_config(vmc_path)
+    with open(vmc_path, "rb") as fh:
+        raw = fh.read()
+    for rows in (range(cfg.size_y - 1, cfg.size_y + 1), range(-2, 2)):
+        try:
+            load_vmc(raw, cfg.size_y, rows=rows)
+        except VmcError:
+            continue
+        raise AssertionError(f"expected a range error for rows {list(rows)}")

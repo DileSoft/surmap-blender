@@ -47,11 +47,40 @@ def save_vmp_bytes(height: np.ndarray, meta: np.ndarray) -> bytes:
 
 def load_vmp(path: str | os.PathLike) -> tuple[np.ndarray, np.ndarray]:
     """Loads ``.vmp`` from disk, inferring ``size_y`` from the file size."""
+    return load_vmp_rows(path, 0, vmp_size_y_of_file(path))
+
+
+def vmp_size_y_of_file(path: str | os.PathLike) -> int:
     size = os.path.getsize(path)
     stride = 2 * H_SIZE
     if size % stride:
         raise VmpError(f"VMP size {size} is not a multiple of the row stride {stride}")
-    return load_vmp_bytes(_read_all(path), size // stride)
+    return size // stride
+
+
+def load_vmp_rows(path: str | os.PathLike, y0: int, rows: int) -> tuple[np.ndarray, np.ndarray]:
+    """Reads ``rows`` rows starting at ``y0`` without touching the rest.
+
+    A row is a fixed 4096-byte record, so a window is a plain seek. Importing
+    a window out of a 64 MB world should not cost a 64 MB read.
+    """
+    stride = 2 * H_SIZE
+    size_y = vmp_size_y_of_file(path)
+    if y0 < 0 or rows < 0 or y0 + rows > size_y:
+        raise VmpError(f"rows {y0}..{y0 + rows} outside a {size_y}-row file")
+    height = np.empty((rows, H_SIZE), dtype=np.uint8)
+    meta = np.empty((rows, H_SIZE), dtype=np.uint8)
+    if rows == 0:
+        return height, meta
+    with open(path, "rb") as fh:
+        fh.seek(y0 * stride)
+        buf = fh.read(rows * stride)
+    if len(buf) != rows * stride:
+        raise VmpError(f"short read: {len(buf)} of {rows * stride} bytes")
+    block = np.frombuffer(buf, dtype=np.uint8).reshape(rows, 2, H_SIZE)
+    np.copyto(height, block[:, 0, :])
+    np.copyto(meta, block[:, 1, :])
+    return height, meta
 
 
 def save_vmp(path: str | os.PathLike, height: np.ndarray, meta: np.ndarray) -> None:
@@ -65,11 +94,6 @@ def vmp_size_y(data: bytes | bytearray | memoryview) -> int:
     if len(data) % stride:
         raise VmpError(f"VMP size {len(data)} is not a multiple of the row stride {stride}")
     return len(data) // stride
-
-
-def _read_all(path: str | os.PathLike) -> bytes:
-    with open(path, "rb") as fh:
-        return fh.read()
 
 
 def _check_shapes(height: np.ndarray, meta: np.ndarray) -> None:

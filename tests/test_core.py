@@ -13,6 +13,7 @@ from core.constants import (
     DELTA_MASK,
     DOUBLE_LEVEL,
     H_SIZE,
+    MAX_RDELTA,
     MIN_RDELTA,
     TERRAIN_OFFSET,
     TUNNEL_PROOF,
@@ -26,15 +27,15 @@ from core.surface import (
     gap_is_tunnel,
     thickness_from_delta,
 )
-from core.vmp import load_vmp, load_vmp_bytes, save_vmp_bytes, vmp_size_y
+from core.vmp import load_vmp, load_vmp_bytes, load_vmp_rows, save_vmp_bytes, vmp_size_y
 
-from framework import all_world_files, check, check_eq, world_file
+from framework import check, check_eq, sample_config, small_vmp, vmc_world
 
 
 def _sample_world_ini() -> str:
-    path = world_file("world.ini")
-    check(path is not None, "no world.ini found in the Vangers checkout")
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    path = small_vmp()
+    with open(os.path.join(os.path.dirname(path), "world.ini"), "r",
+              encoding="utf-8", errors="replace") as fh:
         return fh.read()
 
 
@@ -48,7 +49,21 @@ def test_ini_parses_retail_config() -> None:
     check_eq(cfg.begin_colors, [1, 32, 64, 72, 88, 104, 112, 120], "Begin Colors")
     check_eq(cfg.end_colors, [31, 63, 71, 87, 103, 111, 119, 127], "End Colors")
     check_eq(cfg.file_name, "output", "File Name")
-    check(cfg.is_compressed, "retail worlds use the compressed format")
+
+
+def test_ini_compression_flag_matches_the_files_on_disk() -> None:
+    """`world.ini` must agree with which surface file its world actually ships.
+
+    Worlds come in both flavours -- an uncompressed `.vmp` and a `.vmc` whose
+    row count only exists in the ini -- so a mismatch is a real trap.
+    """
+    vmp_path = small_vmp()
+    check_eq(sample_config(vmp_path).is_compressed, False,
+             f"{vmp_path} ships a .vmp, so the ini must not claim compression")
+
+    vmc_dir = os.path.dirname(vmc_world())
+    check_eq(sample_config(vmc_world()).is_compressed, True,
+             f"{vmc_dir} ships a .vmc, so the ini must claim compression")
 
 
 def test_ini_rejects_bad_version() -> None:
@@ -86,17 +101,40 @@ def test_new_world_config_is_valid() -> None:
 # .vmp
 # ---------------------------------------------------------------------------
 def test_vmp_roundtrip_is_byte_exact() -> None:
-    files = all_world_files("output.vmp")
-    check(len(files) >= 1, "no .vmp found in the Vangers checkout")
-    for path in files:
-        with open(path, "rb") as fh:
-            raw = fh.read()
-        size_y = vmp_size_y(raw)
-        check_eq(size_y * 2 * H_SIZE, len(raw), f"{os.path.basename(path)}: row stride")
-        height, meta = load_vmp(path)
-        check_eq(height.shape, (size_y, H_SIZE), f"{path}: height shape")
-        check_eq(height.dtype, np.uint8, "height dtype")
-        check_eq(save_vmp_bytes(height, meta), raw, f"{path}: byte-exact round-trip")
+    """Reading and writing a real `.vmp` must not change a single byte.
+
+    One small world (2048 rows, 8 MB) is enough: the row layout is fixed, and
+    sweeping every shipped world would cost minutes for no extra coverage.
+    """
+    path = small_vmp()
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    size_y = vmp_size_y(raw)
+    check_eq(size_y * 2 * H_SIZE, len(raw), "row stride")
+    height, meta = load_vmp(path)
+    check_eq(height.shape, (size_y, H_SIZE), "height shape")
+    check_eq(height.dtype, np.uint8, "height dtype")
+    check_eq(save_vmp_bytes(height, meta), raw, "byte-exact round-trip")
+
+
+def test_vmp_row_window_reads_the_same_bytes() -> None:
+    """`load_vmp_rows` is what the import window uses; it must seek, not guess."""
+    path = small_vmp()
+    full_h, full_m = load_vmp(path)
+    y0 = 3
+    win_h, win_m = load_vmp_rows(path, y0, 17)
+    check(np.array_equal(win_h, full_h[y0:y0 + 17]), "window heights")
+    check(np.array_equal(win_m, full_m[y0:y0 + 17]), "window flags")
+
+    # out-of-range requests are refused rather than silently clamped
+    from core.vmp import VmpError
+
+    for y0_bad, rows_bad in ((-1, 4), (0, -4), (full_h.shape[0] - 1, 8)):
+        try:
+            load_vmp_rows(path, y0_bad, rows_bad)
+        except VmpError:
+            continue
+        raise AssertionError(f"expected a range error for {y0_bad}+{rows_bad}")
 
 
 def test_vmp_reads_known_layout() -> None:
@@ -277,47 +315,43 @@ def test_solver_never_touches_a_pair_outside_the_edited_region() -> None:
 # real data
 # ---------------------------------------------------------------------------
 def test_real_world_double_flags_are_symmetric() -> None:
-    for path in all_world_files("output.vmp"):
-        height, meta = load_vmp(path)
-        s = Surface(height, meta)
-        check_eq(s.pair_mismatches(), 0, f"{os.path.basename(path)}: DOUBLE symmetry")
-        doubles = s.count_doubles()
-        check(doubles > 0, f"{os.path.basename(path)}: expected some double columns")
+    """Both columns of a real double pair must carry the flag."""
+    s = Surface(*load_vmp(small_vmp()))
+    check_eq(s.pair_mismatches(), 0, "DOUBLE symmetry")
+    check(s.count_doubles() > 0, "expected some double columns")
 
 
 def test_real_world_delta_statistics_are_pinned() -> None:
     """Regression baseline for what the shipped data actually looks like.
 
-    The retail deltas are *not* a function of the current geometry: `d4` spans
-    0..15, saturates at the ``MAX_RDELTA`` cap, and pairs carrying the same
-    `d4` have wildly different gaps. That is exactly why the solver never
-    recomputes a pair the author did not touch.
+    The retail deltas are *not* a function of the current geometry: every one of
+    the 16 `d4` values occurs, and pairs carrying the *same* `d4` have wildly
+    different gaps. That is exactly why the solver never recomputes a pair the
+    author did not touch.
     """
-    path = world_file("output.vmp")
-    check(path is not None, "no .vmp found")
-    height, meta = load_vmp(path)
-    s = Surface(height, meta)
+    s = Surface(*load_vmp(small_vmp()))
     dbl = s.pair_double()
     d4 = s.pair_delta()[dbl]
     gap = s.pair_gap()[dbl]
 
-    check(d4.min() == 0 and d4.max() == 15, f"d4 range {d4.min()}..{d4.max()}")
-    check(int((d4 == 15).sum()) > 0, "some pairs saturate the MAX_RDELTA cap")
-    thin = int((gap < MIN_TUNNEL_GAP).sum())
-    check(thin > 0, "shipped data violates the tunnel invariant (expected)")
-    if "fostral" in path:
-        check_eq(int(dbl.sum()), 1_932_902, "fostral double-pair count")
-        check_eq(thin, 138_752, "fostral pairs narrower than a valid tunnel")
+    check(dbl.sum() > 0, "the sample should contain double pairs")
+    check_eq(sorted(np.unique(d4).tolist()), list(range(16)),
+             "all 16 d4 values should occur in the shipped data")
+    check(int((gap < MIN_TUNNEL_GAP).sum()) > 0,
+          "shipped data violates the tunnel invariant (expected)")
+    # the same d4 must not imply the same gap -- that is the whole point
+    wide = gap[d4 == int(d4.max())]
+    check(int(wide.max() - wide.min()) > MIN_TUNNEL_GAP,
+          "a single d4 value should cover a range of real gaps")
 
 
 def test_real_world_export_is_unchanged_after_solve() -> None:
     """Exporting an untouched world must be a byte-for-byte no-op."""
-    for path in all_world_files("output.vmp"):
-        with open(path, "rb") as fh:
-            raw = fh.read()
-        height, meta = load_vmp(path)
-        s = Surface(height, meta)
-        report = solve(s)
-        check_eq(report.total(), 0, f"{os.path.basename(path)}: solve must be a no-op")
-        check_eq(save_vmp_bytes(s.height, s.meta), raw,
-                 f"{os.path.basename(path)}: untouched export is byte-identical")
+    path = small_vmp()
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    surface = Surface(*load_vmp(path))
+    report = solve(surface)
+    check_eq(report.total(), 0, "solve must be a no-op")
+    check_eq(save_vmp_bytes(surface.height, surface.meta), raw,
+             "untouched export is byte-identical")

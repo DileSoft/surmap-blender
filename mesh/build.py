@@ -107,9 +107,15 @@ def get_object_region(obj: bpy.types.Object) -> Region:
     )
 
 
-def build_upper(name: str, surface, region: Region, colors: np.ndarray | None = None
-                ) -> bpy.types.Object:
-    """One vertex per voxel; Z is the upper surface."""
+def build_upper(name: str, surface, region: Region, colors: np.ndarray | None = None,
+                origin_y: int | None = None) -> bpy.types.Object:
+    """One vertex per voxel; Z is the upper surface.
+
+    ``region.y0`` says where the window's rows live *inside* ``surface``;
+    ``origin_y`` is where the window sits *in the world*, which is what the mesh
+    coordinates and the export metadata use. They differ whenever the caller
+    hands in a surface that is already a slice of a world.
+    """
     height, meta = gather(surface, region)
     phase = region.x0 & 1
     z = up_alt(height, meta, phase).astype(np.float32)
@@ -117,9 +123,10 @@ def build_upper(name: str, surface, region: Region, colors: np.ndarray | None = 
     dbl = is_double(meta)
 
     depth, width = region.depth, region.width
+    world_region = _placed(region, origin_y)
     loops, starts = _quad_grid(width, depth)
     coords = _coords(region.columns.astype(np.float32),
-                     (region.y0 + np.arange(depth)).astype(np.float32), z)
+                     (world_region.y0 + np.arange(depth)).astype(np.float32), z)
     obj = _new_mesh_object(name, loops, starts, coords)
 
     mesh = obj.data
@@ -127,17 +134,18 @@ def build_upper(name: str, surface, region: Region, colors: np.ndarray | None = 
     _set_bool(mesh, ATTR_DOUBLE, dbl)
     if colors is not None:
         _set_color(mesh, ATTR_COLOR, colors.astype(np.float32) / 255.0)
-    set_object_region(obj, region, UPPER)
+    set_object_region(obj, world_region, UPPER)
     return obj
 
 
-def build_lower(name: str, surface, region: Region, colors: np.ndarray | None = None
-                ) -> bpy.types.Object:
+def build_lower(name: str, surface, region: Region, colors: np.ndarray | None = None,
+                origin_y: int | None = None) -> bpy.types.Object:
     """One vertex per pair (even column); Z is the underside."""
     deck, underside = gather_pair_heights(surface, region)
     pairs = region.pair_region()
     width = pairs.width // 2
     depth = region.depth
+    world_region = _placed(region, origin_y)
 
     # the material and flag of a pair, taken from its even column
     cols = (pairs.x0 + np.arange(pairs.width, dtype=np.int64)) % H_SIZE
@@ -148,7 +156,7 @@ def build_lower(name: str, surface, region: Region, colors: np.ndarray | None = 
 
     loops, starts = _quad_grid(width, depth)
     xs = (pairs.x0 + np.arange(pairs.width, dtype=np.int64))[0::2].astype(np.float32)
-    ys = (region.y0 + np.arange(depth)).astype(np.float32)
+    ys = (world_region.y0 + np.arange(depth)).astype(np.float32)
     coords = _coords(xs, ys, underside.astype(np.float32))
 
     obj = _new_mesh_object(name, loops, starts, coords)
@@ -157,5 +165,12 @@ def build_lower(name: str, surface, region: Region, colors: np.ndarray | None = 
     _set_bool(mesh, ATTR_DOUBLE, dbl)
     if colors is not None:
         _set_color(mesh, ATTR_COLOR, colors.astype(np.float32) / 255.0)
-    set_object_region(obj, region, LOWER)
+    set_object_region(obj, world_region, LOWER)
     return obj
+
+
+def _placed(region: Region, origin_y: int | None) -> Region:
+    """The same window, but positioned in world coordinates."""
+    if origin_y is None or origin_y == region.y0:
+        return region
+    return Region(x0=region.x0, y0=origin_y, width=region.width, depth=region.depth)

@@ -13,7 +13,7 @@ from core.config import WorldConfig, new_world_config
 from core.palette import load_palette, prepared_rgba
 from core.render import lower_indices_arr, render_prepare, upper_indices_arr
 from core.surface import Surface
-from core.vmp import load_vmp, save_vmp, vmp_size_y
+from core.vmp import load_vmp, load_vmp_rows, save_vmp
 from core.vmc import load_vmc, save_vmc
 from core.window import Region, gather
 
@@ -57,12 +57,35 @@ def _palette_for(cfg: WorldConfig, directory: str) -> np.ndarray | None:
     return None
 
 
-def _load_surface_vmc(path: str, cfg: WorldConfig) -> Surface:
-    """`.vmc` carries no row count, so `world.ini` must agree with it."""
-    with open(path, "rb") as fh:
-        data = fh.read()
-    height, meta = load_vmc(data, cfg.size_y)
-    return Surface(height, meta)
+def _read_window(path: str, cfg: WorldConfig, y0: int, rows: int):
+    """Reads just the rows of an import window out of a surface file.
+
+    Both formats are row-seekable (a `.vmp` row is a fixed record, a `.vmc` row
+    has its own offset in the table), so importing a 512x512 window out of a
+    64 MB world does not have to read the whole world.
+    """
+    if path.lower().endswith(".vmc"):
+        with open(path, "rb") as fh:
+            data = fh.read()
+        return load_vmc(data, cfg.size_y, rows=range(y0, y0 + rows))
+    return load_vmp_rows(path, y0, rows)
+
+
+def align_window(region: Region) -> Region:
+    """Widens an import window so it starts on an even column and is even wide.
+
+    A pair is an even column plus its odd neighbour, and the up/down accessors
+    step between the two with a circular shift. That shift is the torus
+    neighbour on a full 2048-column map, but inside a window it must stay
+    *within* a pair -- so a window that starts mid-pair would read a column it
+    does not have. The window is therefore rounded outwards, which keeps every
+    column the user asked for.
+    """
+    x0 = region.x0 & ~1
+    width = (region.width + (region.x0 & 1) + 1) & ~1
+    if (x0, width) == (region.x0, region.width):
+        return region
+    return Region(x0=x0, y0=region.y0, width=width, depth=region.depth)
 
 
 def can_open_browser() -> bool:
@@ -148,39 +171,36 @@ class VANGERS_OT_import_world(Operator):
         with open(ini_path, "r", encoding="utf-8", errors="replace") as fh:
             cfg = WorldConfig.parse(fh.read())
 
+        region = align_window(Region(self.x0, self.y0, self.width, self.depth))
         try:
-            if path.lower().endswith(".vmc"):
-                surface = _load_surface_vmc(path, cfg)
-            else:
-                height, meta = load_vmp(path)
-                surface = Surface(height, meta)
+            height, meta = _read_window(path, cfg, region.y0, region.depth)
         except Exception as exc:  # noqa: BLE001
             self.report({"ERROR"}, f"cannot read surface: {exc}")
             return {"CANCELLED"}
-
-        region = Region(self.x0, self.y0, self.width, self.depth)
-        if region.depth > surface.size_y:
-            self.report({"ERROR"}, f"the world only has {surface.size_y} rows")
-            return {"CANCELLED"}
+        surface = Surface(height, meta)
+        # the surface holds *only* the window's rows, so every lookup into it
+        # starts at row 0; `region` still carries where the window belongs
+        local = Region(region.x0, 0, region.width, region.depth)
 
         luts = render_prepare(cfg.begin_colors, cfg.end_colors, 0)
         rgba = _palette_for(cfg, directory)
-        height_w, meta_w = gather(surface, region)
-        phase = region.x0 & 1
-        offset = phase
+        height_w, meta_w = gather(surface, local)
         pair_count = region.pair_count
         if rgba is not None:
-            up_c = rgba[upper_indices_arr(height_w, meta_w, luts, phase)]
-            lo_c = rgba[lower_indices_arr(height_w, meta_w, luts, phase)][
-                :, offset::2
-            ][:, :pair_count]
+            # `up_alt`/`down_alt` cross a pair with a circular shift, which is
+            # only the right neighbour inside a *complete* pair -- another
+            # reason the window has to be pair-aligned.
+            up_c = rgba[upper_indices_arr(height_w, meta_w, luts, 0)]
+            lo_c = rgba[lower_indices_arr(height_w, meta_w, luts, 0)][:, 0::2]
         else:
             up_c = lo_c = None
 
         _clear()
         coll = _collection()
-        upper = build.build_upper("Vangers_upper", surface, region, up_c)
-        lower = build.build_lower("Vangers_lower", surface, region, lo_c)
+        upper = build.build_upper("Vangers_upper", surface, local, up_c,
+                                  origin_y=region.y0)
+        lower = build.build_lower("Vangers_lower", surface, local, lo_c,
+                                  origin_y=region.y0)
         coll.objects.link(upper)
         coll.objects.link(lower)
         lower.hide_set(not bool(context.scene.vmap_lower_visible))
@@ -190,8 +210,12 @@ class VANGERS_OT_import_world(Operator):
         scene.vmap_x0, scene.vmap_y0 = region.x0, region.y0
         scene.vmap_width, scene.vmap_depth = region.width, region.depth
         scene.vmap_step = self.step
+        note = ""
+        if (region.x0, region.width) != (self.x0, self.width):
+            note = " (widened to whole pairs)"
         self.report({"INFO"}, f"loaded {os.path.basename(path)}: "
-                              f"{region.width}x{region.depth} at ({region.x0},{region.y0})")
+                              f"{region.width}x{region.depth} at "
+                              f"({region.x0},{region.y0}){note}")
         return {"FINISHED"}
 
 

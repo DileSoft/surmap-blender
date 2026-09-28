@@ -124,16 +124,18 @@ class VmcDecoder:
     # -- vectorised path ----------------------------------------------------
     def decode_all(self, data, offsets: np.ndarray, sizes: np.ndarray,
                    height: np.ndarray, meta: np.ndarray) -> None:
-        """Decodes every row at once, since both trees are shared.
+        """Decodes the given rows at once, since both trees are shared.
 
-        Rows that finish early simply stop consuming, exactly like the scalar
-        loop breaking out once it has produced ``H_SIZE`` symbols.
+        ``offsets``/``sizes`` pick the rows to decode, so a window of a big
+        world costs only that window. Rows that finish early simply stop
+        consuming, exactly like the scalar loop breaking out once it has
+        produced ``H_SIZE`` symbols.
         """
         rows = np.arange(offsets.size, dtype=np.int64)
         buf = np.frombuffer(data, dtype=np.uint8)
         limit = buf.size
 
-        inpos = offsets.copy()
+        inpos = np.array(offsets, dtype=np.int64)
         cindex = np.ones(offsets.size, dtype=np.int32)
         last = np.zeros(offsets.size, dtype=np.uint8)
         outpos = np.zeros(offsets.size, dtype=np.int64)
@@ -345,13 +347,26 @@ class HuffEncoder:
 # ---------------------------------------------------------------------------
 # whole-file entry points
 # ---------------------------------------------------------------------------
-def load_vmc(data, size_y: int) -> tuple[np.ndarray, np.ndarray]:
-    """Decodes a ``.vmc`` buffer into ``(height, meta)`` arrays."""
+def load_vmc(data, size_y: int, rows=None) -> tuple[np.ndarray, np.ndarray]:
+    """Decodes a ``.vmc`` buffer into ``(height, meta)`` arrays.
+
+    ``rows`` selects which rows of the file to decode (default: all). A row is
+    self-contained once the shared trees are read, so decoding a window costs
+    only the window -- importing a 512x512 window out of a 16384-row world is
+    then instant instead of a full-map pass.
+    """
     offsets, sizes = read_table(data, size_y)
+    if rows is None:
+        sel = np.arange(size_y, dtype=np.int64)
+    else:
+        sel = np.asarray(rows, dtype=np.int64).reshape(-1)
+        if sel.size and (int(sel.min()) < 0 or int(sel.max()) >= size_y):
+            raise VmcError(f"row out of range: {int(sel.min())}..{int(sel.max())} "
+                           f"for a {size_y}-row file")
     decoder = VmcDecoder(data, size_y * RECORD_BYTES)
-    height = np.empty((size_y, H_SIZE), dtype=np.uint8)
-    meta = np.empty((size_y, H_SIZE), dtype=np.uint8)
-    decoder.decode_all(data, offsets, sizes, height, meta)
+    height = np.empty((sel.size, H_SIZE), dtype=np.uint8)
+    meta = np.empty((sel.size, H_SIZE), dtype=np.uint8)
+    decoder.decode_all(data, offsets[sel], sizes[sel], height, meta)
     return height, meta
 
 

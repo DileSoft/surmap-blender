@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import bpy
+import numpy as np
 from bpy.types import Panel
 
-from .. import mesh
+from ..mesh import build
 
 
 class _Panel:
@@ -27,12 +28,14 @@ class VANGERS_PT_window(_Panel, Panel):
                         f"({scene.vmap_x0}, {scene.vmap_y0})")
 
         box = layout.box()
-        box.label(text="Import window")
+        box.label(text="Окно импорта")
         box.prop(scene, "vmap_x0")
         box.prop(scene, "vmap_y0")
         box.prop(scene, "vmap_width")
         box.prop(scene, "vmap_depth")
-        box.operator("vangers.import_world", icon="IMPORT")
+        box.operator("vangers.import_world", "INVOKE_DEFAULT",
+                     text="Import world…", icon="IMPORT")
+        box.label(text="Рядом с .vmp/.vmc должен лежать world.ini")
 
         layout.prop(scene, "vmap_lower_visible")
 
@@ -43,10 +46,12 @@ class VANGERS_PT_authoring(_Panel, Panel):
 
     def draw(self, context):
         layout = self.layout
+        scene = context.scene
         row = layout.row(align=True)
         row.operator("vangers.new_world", icon="ADD")
         row.operator("vangers.export_world", icon="EXPORT")
-        layout.label(text="Формат и «enforce» — в параметрах оператора (клавиша F9).")
+        layout.label(text="Экспорт пишет файл рядом с исходным миром;")
+        layout.label(text="формат и «enforce» — в параметрах оператора (F9).")
 
         box = layout.box()
         box.label(text="Bridge (double level)")
@@ -71,10 +76,8 @@ class VANGERS_PT_authoring(_Panel, Panel):
 
         lower = bpy.data.objects.get("Vangers_lower")
         if lower is not None:
-            attr = lower.data.attributes.get(mesh.ATTR_DOUBLE)
+            attr = lower.data.attributes.get(build.ATTR_DOUBLE)
             if attr is not None:
-                import numpy as np
-
                 n = len(lower.data.vertices)
                 vals = np.empty(n, dtype=bool)
                 attr.data.foreach_get("value", vals)

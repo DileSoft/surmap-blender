@@ -83,21 +83,34 @@ class VANGERS_OT_import_world(Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     filepath: StringProperty(subtype="FILE_PATH")
+    filter_glob: StringProperty(default="*.vmp;*.vmc", options={"HIDDEN"})
     x0: IntProperty(name="X start", default=0, min=0)
     y0: IntProperty(name="Y start", default=0, min=0)
     width: IntProperty(name="Columns", default=512, min=2, max=2048)
     depth: IntProperty(name="Rows", default=512, min=2)
     step: IntProperty(name="Step", default=1, min=1, max=8)
 
+    def invoke(self, context, event):
+        """Seeds the window from the panel, then opens the file browser."""
+        scene = context.scene
+        self.x0 = scene.vmap_x0
+        self.y0 = scene.vmap_y0
+        self.width = scene.vmap_width
+        self.depth = scene.vmap_depth
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
     def execute(self, context):
-        path = self.filepath
+        path = bpy.path.abspath(self.filepath) if self.filepath else ""
         if not path or not os.path.isfile(path):
-            self.report({"ERROR"}, "no .vmp file selected")
+            self.report({"ERROR"}, "no .vmp/.vmc file selected")
             return {"CANCELLED"}
         directory = os.path.dirname(path)
         ini_path = os.path.join(directory, "world.ini")
         if not os.path.isfile(ini_path):
-            self.report({"ERROR"}, "world.ini must sit next to the .vmp")
+            self.report({"ERROR"},
+                        "world.ini must sit in the same folder as the .vmp/.vmc — "
+                        "pick the .vmp inside the world's own directory")
             return {"CANCELLED"}
         with open(ini_path, "r", encoding="utf-8", errors="replace") as fh:
             cfg = WorldConfig.parse(fh.read())

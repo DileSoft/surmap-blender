@@ -65,6 +65,21 @@ def _load_surface_vmc(path: str, cfg: WorldConfig) -> Surface:
     return Surface(height, meta)
 
 
+def can_open_browser() -> bool:
+    """Whether a file browser can be shown at all.
+
+    ``wm.fileselect_add`` segfaults Blender in background mode, so it is
+    checked here rather than at each call site. Split out so tests can patch it
+    (``bpy.app.background`` is read-only).
+    """
+    return not bpy.app.background
+
+
+def open_file_browser(context, operator) -> None:
+    """``wm.fileselect_add`` for an operator, isolated so tests can stub it."""
+    context.window_manager.fileselect_add(operator)
+
+
 def _view_state() -> dict:
     scene = bpy.context.scene
     return {
@@ -90,20 +105,38 @@ class VANGERS_OT_import_world(Operator):
     depth: IntProperty(name="Rows", default=512, min=2)
     step: IntProperty(name="Step", default=1, min=1, max=8)
 
-    def invoke(self, context, event):
-        """Seeds the window from the panel, then opens the file browser."""
+    def _seed_from_scene(self, context) -> None:
         scene = context.scene
         self.x0 = scene.vmap_x0
         self.y0 = scene.vmap_y0
         self.width = scene.vmap_width
         self.depth = scene.vmap_depth
-        context.window_manager.fileselect_add(self)
+
+    def _ask_for_file(self, context):
+        """Opens the browser and reports that the operator is still running.
+
+        A panel button runs ``execute``, not ``invoke``, so the browser has to
+        be reachable from here too. In background mode there is no browser to
+        show (``fileselect_add`` crashes Blender there), so say so instead.
+        """
+        if not can_open_browser():
+            self.report({"ERROR"}, "run this from the Blender window; "
+                                   "headless use needs an explicit filepath")
+            return {"CANCELLED"}
+        open_file_browser(context, self)
         return {"RUNNING_MODAL"}
 
+    def invoke(self, context, event):
+        self._seed_from_scene(context)
+        return self._ask_for_file(context)
+
     def execute(self, context):
-        path = bpy.path.abspath(self.filepath) if self.filepath else ""
-        if not path or not os.path.isfile(path):
-            self.report({"ERROR"}, "no .vmp/.vmc file selected")
+        if not self.filepath:
+            self._seed_from_scene(context)
+            return self._ask_for_file(context)
+        path = bpy.path.abspath(self.filepath)
+        if not os.path.isfile(path):
+            self.report({"ERROR"}, f"no such file: {path}")
             return {"CANCELLED"}
         directory = os.path.dirname(path)
         ini_path = os.path.join(directory, "world.ini")

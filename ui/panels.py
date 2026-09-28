@@ -33,8 +33,11 @@ class VANGERS_PT_window(_Panel, Panel):
         box.prop(scene, "vmap_y0")
         box.prop(scene, "vmap_width")
         box.prop(scene, "vmap_depth")
-        box.operator("vangers.import_world", "INVOKE_DEFAULT",
-                     text="Import world…", icon="IMPORT")
+        # No execution context here: UILayout.operator() has no `context`
+        # parameter, and passing one positionally is a TypeError that kills the
+        # rest of draw(). The operator opens the file browser from both
+        # invoke() and execute(), so a plain button is enough.
+        box.operator("vangers.import_world", text="Import world…", icon="IMPORT")
         box.label(text="Рядом с .vmp/.vmc должен лежать world.ini")
 
         layout.prop(scene, "vmap_lower_visible")

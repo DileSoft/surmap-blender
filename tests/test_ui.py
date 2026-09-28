@@ -27,6 +27,30 @@ if not hasattr(_addon, "_tests_registered"):
     _addon._tests_registered = True
 
 
+def _check_operator_call(idname, args, kw) -> None:
+    """Validates a panel's `layout.operator()` call against the real RNA.
+
+    Blender's signature is the source of truth, so this catches new mistakes
+    too: a parameter that does not exist, or a second positional argument
+    (``text`` is the only one, there is no execution context).
+    """
+    params = [p.identifier for p in
+              bpy.types.UILayout.bl_rna.functions["operator"].parameters][1:]
+    if "context" in params:  # future Blender; allow it, do not require it
+        params.remove("context")
+    for name in kw:
+        if name not in params:
+            raise AssertionError(
+                f"layout.operator({idname!r}, ...) got an unknown argument "
+                f"{name!r}; UILayout.operator accepts {params}")
+    if len(args) > 1:
+        raise AssertionError(
+            f"layout.operator({idname!r}, {args!r}) passes an execution context, "
+            "but UILayout.operator has no such parameter -- its second "
+            "positional is `text`. The exception would abort draw() and the "
+            "button would never appear.")
+
+
 class _Recorder:
     """Duck-typed stand-in for a UILayout."""
 
@@ -57,6 +81,11 @@ class _Recorder:
         return self
 
     def operator(self, idname, *args, **kw):
+        # Mirror the real UILayout.operator signature. A permissive *args stub
+        # hides exactly the mistake this test exists for: that function has no
+        # execution-context parameter, so passing "INVOKE_DEFAULT" positionally
+        # raises inside draw() and silently eats the rest of the panel.
+        _check_operator_call(idname, args, kw)
         self.log.append(("operator", idname, self.depth))
         if not hasattr(bpy.ops, idname.split(".")[0]):
             raise AssertionError(f"panel draws an unknown operator: {idname}")
@@ -122,3 +151,50 @@ def test_import_button_opens_the_file_browser() -> None:
         check_eq(op.x0, 64, "invoke() seeded x0 from the scene")
         check_eq(op.width, 32, "invoke() seeded width from the scene")
     print("    invoke ok:", result)
+
+
+def test_window_panel_offers_an_import_button() -> None:
+    """The button has to survive draw(): the user's first symptom was its absence."""
+    from vangers_world.ui import panels
+
+    log = _draw(panels.VANGERS_PT_window)
+    ops = [name for kind, name, _ in log if kind == "operator"]
+    check("vangers.import_world" in ops, f"no import button in the panel: {ops}")
+
+
+def test_button_without_a_path_opens_the_browser() -> None:
+    """A panel button calls execute(), so the dialog must be reachable there.
+
+    ``fileselect_add`` crashes Blender in background mode, so the call is
+    recorded instead of made -- the point is which branch of the operator runs.
+    """
+    from vangers_world.ops import world
+
+    calls: list = []
+    real_open = world.open_file_browser
+    real_can = world.can_open_browser
+    world.open_file_browser = lambda context, op: calls.append(op)
+    world.can_open_browser = lambda: True
+    try:
+        result = bpy.ops.vangers.import_world(filepath="")
+    finally:
+        world.open_file_browser = real_open
+        world.can_open_browser = real_can
+
+    check_eq(len(calls), 1, "execute() with no path must ask for a file")
+    check("RUNNING_MODAL" in result, f"expected a pending operator, got {result}")
+    print("    button without a path ->", result)
+
+
+def test_import_does_not_crash_headless() -> None:
+    """No browser to show in background: report instead of opening one.
+
+    Blender turns an operator that reports ERROR and cancels into a Python
+    RuntimeError when called from a script, so that is the expected signal.
+    """
+    try:
+        result = bpy.ops.vangers.import_world(filepath="")
+    except RuntimeError as exc:
+        check("headless" in str(exc), f"unexpected error: {exc}")
+        return
+    check("CANCELLED" in result, f"headless import must refuse politely, got {result}")
